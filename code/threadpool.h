@@ -19,7 +19,7 @@ public:
     virtual std::string id() = 0;
 };
 
-class ThreadPool {
+class ThreadPool : PcoHoareMonitor {
 public:
     ThreadPool(int maxThreadCount, int maxNbWaiting, std::chrono::milliseconds idleTimeout)
         : maxThreadCount(maxThreadCount), maxNbWaiting(maxNbWaiting), idleTimeout(idleTimeout) {
@@ -28,6 +28,13 @@ public:
 
     ~ThreadPool() {
         // TODO : End smoothly
+        for (PcoThread *t : threads) {
+            //t->requestStop();
+            t->join();
+            delete t;
+        }
+
+        // TODO: delete runnables
     }
 
     /*
@@ -39,12 +46,19 @@ public:
      * If the runnable has been started, returns true, and else (the last case), return false.
      */
     bool start(std::unique_ptr<Runnable> runnable) {
-        if(nbWaiting() == 0 && currentNbThreads() < maxThreadCount){
+        monitorIn();
+
+        semaphore.acquire();
+
+        waiting.push(std::move(runnable));
+        if (nbWaiting() == 0 && currentNbThreads() < maxThreadCount) {
             //allocate new thread
             threads.push_back(new PcoThread(&ThreadPool::execute, this));
         }
 
-        waiting.push(runnable);
+        monitorOut();
+
+        //TODO
         return false;
     }
 
@@ -57,13 +71,32 @@ public:
 
 private:
 
-    size_t nbWaiting(){
+    size_t nbWaiting() {
         return threads.size() - nbWorking;
     }
 
-    void execute(){}
+    void execute() {
+        monitorIn();
 
-    void initThread(){}
+        if (waiting.empty()) wait(condition);
+
+        ++nbWorking;
+
+        std::unique_ptr<Runnable> &task = waiting.front();
+        waiting.pop();
+
+        task->run();
+
+        --nbWorking;
+
+        if (waiting.empty()) {
+            semaphore.release();
+        } else {
+            signal(condition);
+        }
+
+        monitorOut();
+    }
 
     size_t maxThreadCount;
     size_t maxNbWaiting;
@@ -72,6 +105,8 @@ private:
     std::vector<PcoThread *>threads{};
     size_t nbWorking = 0;
     std::queue<std::unique_ptr<Runnable>> waiting{};
+    Condition condition;
+    PcoSemaphore semaphore;
 };
 
 #endif // THREADPOOL_H
