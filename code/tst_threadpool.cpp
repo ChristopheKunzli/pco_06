@@ -5,6 +5,7 @@
 
 #include <pcosynchro/pcologger.h>
 #include <pcosynchro/pcothread.h>
+#include <pcosynchro/pcohoaremonitor.h>
 
 #include "threadpool.h"
 

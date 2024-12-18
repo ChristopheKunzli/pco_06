@@ -9,6 +9,7 @@
 #include <pcosynchro/pcologger.h>
 #include <pcosynchro/pcothread.h>
 #include <pcosynchro/pcohoaremonitor.h>
+//#include <pcosynchro/pcoconditionvariable.h>
 
 class Runnable {
 public:
@@ -22,6 +23,7 @@ class ThreadPool {
 public:
     ThreadPool(int maxThreadCount, int maxNbWaiting, std::chrono::milliseconds idleTimeout)
         : maxThreadCount(maxThreadCount), maxNbWaiting(maxNbWaiting), idleTimeout(idleTimeout) {
+        threads.reserve(maxThreadCount);
     }
 
     ~ThreadPool() {
@@ -37,7 +39,12 @@ public:
      * If the runnable has been started, returns true, and else (the last case), return false.
      */
     bool start(std::unique_ptr<Runnable> runnable) {
-        // TODO
+        if(nbWaiting() == 0 && currentNbThreads() < maxThreadCount){
+            //allocate new thread
+            threads.push_back(new PcoThread(&ThreadPool::execute, this));
+        }
+
+        waiting.push(runnable);
         return false;
     }
 
@@ -45,15 +52,26 @@ public:
      * just to be alive.
      */
     size_t currentNbThreads() {
-        // TODO
-        return 0;
+        return threads.size();
     }
 
 private:
 
+    size_t nbWaiting(){
+        return threads.size() - nbWorking;
+    }
+
+    void execute(){}
+
+    void initThread(){}
+
     size_t maxThreadCount;
     size_t maxNbWaiting;
     std::chrono::milliseconds idleTimeout;
+
+    std::vector<PcoThread *>threads{};
+    size_t nbWorking = 0;
+    std::queue<std::unique_ptr<Runnable>> waiting{};
 };
 
 #endif // THREADPOOL_H
