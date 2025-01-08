@@ -4,6 +4,9 @@
 #include <iostream>
 #include <stack>
 #include <vector>
+#include <future>
+#include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cassert>
 #include <pcosynchro/pcologger.h>
@@ -29,7 +32,8 @@ public:
     ~ThreadPool() {
         // TODO : End smoothly
         for (PcoThread *t : threads) {
-            //t->requestStop();
+            t->requestStop();
+            signal(condition);
             t->join();
             delete t;
         }
@@ -48,8 +52,6 @@ public:
     bool start(std::unique_ptr<Runnable> runnable) {
         monitorIn();
 
-        semaphore.acquire();
-
         waiting.push(std::move(runnable));
         if (nbWaiting() == 0 && currentNbThreads() < maxThreadCount) {
             //allocate new thread
@@ -59,7 +61,7 @@ public:
         monitorOut();
 
         //TODO
-        return false;
+        return nbWaiting() > 0;
     }
 
     /* Returns the number of currently running threads. They do not need to be executing a task,
@@ -76,37 +78,59 @@ private:
     }
 
     void execute() {
-        monitorIn();
+        while (true) {
+            monitorIn();
 
-        if (waiting.empty()) wait(condition);
+            std::atomic<bool> canceledTimeout = false;
 
-        ++nbWorking;
+            std::future<void> future = std::async(std::launch::async, [this, &canceledTimeout]()
+            {
+                PcoThread::thisThread()->usleep(idleTimeout.count() * 1000);
+                if (!canceledTimeout) {
+                    signal(condition);
+                    PcoThread::thisThread()->requestStop();
+                }
+            });
 
-        std::unique_ptr<Runnable> &task = waiting.front();
-        waiting.pop();
+            std::cout << "BEFORE TOTO" << std::endl;
+            if (waiting.empty()) wait(condition);
+            std::cout << "TOTO" << std::endl;
+            if (PcoThread::thisThread()->stopRequested()) {
+                // TODO delete PcoThread::thisThread();
+                std::cout << "Remove thread" << std::endl;
+                auto iterator = std::find(threads.begin(), threads.end(), PcoThread::thisThread());
+                threads.erase(iterator, next(iterator));
+                std::cout << "Removed thread" << std::endl;
 
-        task->run();
 
-        --nbWorking;
+                monitorOut();
+                return;
+            }
 
-        if (waiting.empty()) {
-            semaphore.release();
-        } else {
-            signal(condition);
+            canceledTimeout = true;
+
+            ++nbWorking;
+
+            std::unique_ptr<Runnable> task = std::move(waiting.front());
+            waiting.pop();
+
+            std::cout << "before run" << std::endl;
+            task->run();
+            std::cout << "run" << std::endl;
+
+            --nbWorking;
+
+            monitorOut();     
         }
-
-        monitorOut();
     }
 
     size_t maxThreadCount;
     size_t maxNbWaiting;
     std::chrono::milliseconds idleTimeout;
-
     std::vector<PcoThread *>threads{};
     size_t nbWorking = 0;
     std::queue<std::unique_ptr<Runnable>> waiting{};
     Condition condition;
-    PcoSemaphore semaphore;
 };
 
 #endif // THREADPOOL_H
