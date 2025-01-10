@@ -29,11 +29,12 @@ public:
     }
 
     ~ThreadPool() {
+        monitorIn();
         if (!waiting.empty()) wait(stopCondition);
+        monitorOut();
 
         // TODO : End smoothly
         for (PcoThread *t : threads) {
-            std::cout << "request stop" << std::endl << std::flush;
             t->requestStop();
             signal(condition);
             t->join();
@@ -66,8 +67,6 @@ public:
 
         monitorOut();
 
-        std::cout << threads.size() << std::endl << std::flush;
-
         //TODO
         return isStarted;
     }
@@ -90,40 +89,36 @@ private:
             monitorIn();
             std::cout << "begin" << std::endl << std::flush;
 
-            std::atomic<bool> timeout(true);
+            std::atomic<bool> *timeout = new std::atomic<bool>(true);
             PcoThread *thisThread = PcoThread::thisThread();
 
             std::future<void> future = std::async(std::launch::async, [this, &timeout, &thisThread]() {
                 std::this_thread::sleep_for(idleTimeout);
-                if (timeout) {
+                if (*timeout) {
                     std::cout << "timeout" << std::endl << std::flush;
                     signal(condition);
                     thisThread->requestStop();
                 }
+                delete timeout;
             });
 
-            std::cout << "BEFORE TOTO" << std::endl << std::flush;
             if (waiting.empty() && !PcoThread::thisThread()->stopRequested()) wait(condition);
-            std::cout << "TOTO" << std::endl << std::flush;
-            timeout = false;
             if (PcoThread::thisThread()->stopRequested()) {
                 // TODO delete PcoThread::thisThread();
-                std::cout << "Remove thread" << std::endl << std::flush;
                 auto iterator = std::find(threads.begin(), threads.end(), PcoThread::thisThread());
                 threads.erase(iterator, next(iterator));
 
                 monitorOut();
                 return;
             }
+            *timeout = false;
 
             ++nbWorking;
 
             std::unique_ptr<Runnable> task = std::move(waiting.front());
             waiting.pop();
           
-            std::cout << "before run" << std::endl;
             task->run();
-            std::cout << "run" << std::endl;
 
             --nbWorking;
             if (waiting.empty()) signal(stopCondition);
