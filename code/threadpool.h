@@ -58,12 +58,12 @@ public:
         // TODO if (currentNbThreads == maxThreadCount)
 
         waiting.push(std::move(runnable));
-        if (nbWaiting() == 0 && currentNbThreads() < maxThreadCount) {
+        bool createNewThread = nbWaiting() < waiting.size() && currentNbThreads() < maxThreadCount;
+        bool isStarted = createNewThread || nbWaiting() >= waiting.size();
+        if (createNewThread) {
             //allocate new thread
             threads.push_back(new PcoThread(&ThreadPool::execute, this));
         }
-
-        bool isStarted = nbWaiting() > 0;
 
         monitorOut();
 
@@ -84,31 +84,40 @@ private:
         return threads.size() - nbWorking;
     }
 
+    void handleTimeout(PcoThread *parentThread, std::atomic<bool> *timeout) {
+        PcoThread::thisThread()->usleep(1000 * idleTimeout.count());
+        if (*timeout) {
+            monitorIn();
+            std::cout << "timeout" << std::endl << std::flush;
+            signal(condition);
+            parentThread->requestStop();
+            monitorOut();
+        }
+
+        delete timeout;
+
+        // TODO
+        // delete PcoThread::thisThread();
+    }
+
     void execute() {
         while (true) {
             monitorIn();
-            std::cout << "begin" << std::endl << std::flush;
 
             std::atomic<bool> *timeout = new std::atomic<bool>(true);
             PcoThread *thisThread = PcoThread::thisThread();
 
-            std::future<void> future = std::async(std::launch::async, [this, &timeout, &thisThread]() {
-                std::this_thread::sleep_for(idleTimeout);
-                if (*timeout) {
-                    std::cout << "timeout" << std::endl << std::flush;
-                    signal(condition);
-                    thisThread->requestStop();
-                }
-                delete timeout;
-            });
+            new PcoThread(&ThreadPool::handleTimeout, this, thisThread, timeout);
 
             if (waiting.empty() && !PcoThread::thisThread()->stopRequested()) wait(condition);
             if (PcoThread::thisThread()->stopRequested()) {
-                // TODO delete PcoThread::thisThread();
                 auto iterator = std::find(threads.begin(), threads.end(), PcoThread::thisThread());
                 threads.erase(iterator, next(iterator));
 
                 monitorOut();
+
+                // TODO
+                // delete PcoThread::thisThread();
                 return;
             }
             *timeout = false;
@@ -117,9 +126,14 @@ private:
 
             std::unique_ptr<Runnable> task = std::move(waiting.front());
             waiting.pop();
+
+            // unlock monitor before running the task
+            monitorOut();
           
             task->run();
 
+            monitorIn();
+            
             --nbWorking;
             if (waiting.empty()) signal(stopCondition);
 
