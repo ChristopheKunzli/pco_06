@@ -12,7 +12,6 @@
 #include <pcosynchro/pcologger.h>
 #include <pcosynchro/pcothread.h>
 #include <pcosynchro/pcohoaremonitor.h>
-//#include <pcosynchro/pcoconditionvariable.h>
 
 class Runnable {
 public:
@@ -30,8 +29,11 @@ public:
     }
 
     ~ThreadPool() {
+        if (!waiting.empty()) wait(stopCondition);
+
         // TODO : End smoothly
         for (PcoThread *t : threads) {
+            std::cout << "request stop" << std::endl << std::flush;
             t->requestStop();
             signal(condition);
             t->join();
@@ -52,16 +54,22 @@ public:
     bool start(std::unique_ptr<Runnable> runnable) {
         monitorIn();
 
+        // TODO if (currentNbThreads == maxThreadCount)
+
         waiting.push(std::move(runnable));
         if (nbWaiting() == 0 && currentNbThreads() < maxThreadCount) {
             //allocate new thread
             threads.push_back(new PcoThread(&ThreadPool::execute, this));
         }
 
+        bool isStarted = nbWaiting() > 0;
+
         monitorOut();
 
+        std::cout << threads.size() << std::endl << std::flush;
+
         //TODO
-        return nbWaiting() > 0;
+        return isStarted;
     }
 
     /* Returns the number of currently running threads. They do not need to be executing a task,
@@ -80,47 +88,47 @@ private:
     void execute() {
         while (true) {
             monitorIn();
+            std::cout << "begin" << std::endl << std::flush;
 
-            std::atomic<bool> canceledTimeout = false;
+            std::atomic<bool> timeout(true);
+            PcoThread *thisThread = PcoThread::thisThread();
 
-            std::future<void> future = std::async(std::launch::async, [this, &canceledTimeout]()
-            {
-                PcoThread::thisThread()->usleep(idleTimeout.count() * 1000);
-                if (!canceledTimeout) {
+            std::future<void> future = std::async(std::launch::async, [this, &timeout, &thisThread]() {
+                std::this_thread::sleep_for(idleTimeout);
+                if (timeout) {
+                    std::cout << "timeout" << std::endl << std::flush;
                     signal(condition);
-                    PcoThread::thisThread()->requestStop();
+                    thisThread->requestStop();
                 }
             });
 
-            std::cout << "BEFORE TOTO" << std::endl;
-            if (waiting.empty()) wait(condition);
-            std::cout << "TOTO" << std::endl;
+            std::cout << "BEFORE TOTO" << std::endl << std::flush;
+            if (waiting.empty() && !PcoThread::thisThread()->stopRequested()) wait(condition);
+            std::cout << "TOTO" << std::endl << std::flush;
+            timeout = false;
             if (PcoThread::thisThread()->stopRequested()) {
                 // TODO delete PcoThread::thisThread();
-                std::cout << "Remove thread" << std::endl;
+                std::cout << "Remove thread" << std::endl << std::flush;
                 auto iterator = std::find(threads.begin(), threads.end(), PcoThread::thisThread());
                 threads.erase(iterator, next(iterator));
-                std::cout << "Removed thread" << std::endl;
-
 
                 monitorOut();
                 return;
             }
 
-            canceledTimeout = true;
-
             ++nbWorking;
 
             std::unique_ptr<Runnable> task = std::move(waiting.front());
             waiting.pop();
-
+          
             std::cout << "before run" << std::endl;
             task->run();
             std::cout << "run" << std::endl;
 
             --nbWorking;
+            if (waiting.empty()) signal(stopCondition);
 
-            monitorOut();     
+            monitorOut();
         }
     }
 
@@ -131,6 +139,7 @@ private:
     size_t nbWorking = 0;
     std::queue<std::unique_ptr<Runnable>> waiting{};
     Condition condition;
+    Condition stopCondition;
 };
 
 #endif // THREADPOOL_H
