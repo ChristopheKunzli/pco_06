@@ -12,6 +12,7 @@
 #include <pcosynchro/pcologger.h>
 #include <pcosynchro/pcothread.h>
 #include <pcosynchro/pcohoaremonitor.h>
+#include <pcosynchro/pcomutex.h>
 
 class Runnable {
 public:
@@ -24,24 +25,21 @@ public:
 class ThreadPool : PcoHoareMonitor {
 public:
     ThreadPool(int maxThreadCount, int maxNbWaiting, std::chrono::milliseconds idleTimeout)
-        : maxThreadCount(maxThreadCount), maxNbWaiting(maxNbWaiting), idleTimeout(idleTimeout) {
-        threads.reserve(maxThreadCount);
-    }
+        : maxThreadCount(maxThreadCount), maxNbWaiting(maxNbWaiting), idleTimeout(idleTimeout) {}
 
     ~ThreadPool() {
         monitorIn();
         if (!waiting.empty()) wait(stopCondition);
         monitorOut();
 
-        // TODO : End smoothly
         for (PcoThread *t : threads) {
             t->requestStop();
+            monitorIn();
             signal(condition);
+            monitorOut();
             t->join();
             delete t;
         }
-
-        // TODO: delete runnables
     }
 
     /*
@@ -61,13 +59,12 @@ public:
         bool createNewThread = nbWaiting() < waiting.size() && currentNbThreads() < maxThreadCount;
         bool isStarted = createNewThread || nbWaiting() >= waiting.size();
         if (createNewThread) {
-            //allocate new thread
+            ++nbThread;
             threads.push_back(new PcoThread(&ThreadPool::execute, this));
         }
 
         monitorOut();
 
-        //TODO
         return isStarted;
     }
 
@@ -75,26 +72,28 @@ public:
      * just to be alive.
      */
     size_t currentNbThreads() {
-        return threads.size();
+        return nbThread;
     }
 
 private:
 
     size_t nbWaiting() {
-        return threads.size() - nbWorking;
+        mutexNbWorking.lock();
+        size_t amount = nbThread - nbWorking;
+        mutexNbWorking.unlock();
+
+        return amount;
     }
 
-    void handleTimeout(PcoThread *parentThread, std::atomic<bool> *timeout) {
+    void handleTimeout(std::shared_ptr<std::atomic<bool>> requestedStop, std::shared_ptr<std::atomic<bool>> timeout) {
         PcoThread::thisThread()->usleep(1000 * idleTimeout.count());
         if (*timeout) {
-            monitorIn();
             std::cout << "timeout" << std::endl << std::flush;
+            *requestedStop = true;
+            monitorIn();
             signal(condition);
-            parentThread->requestStop();
             monitorOut();
         }
-
-        delete timeout;
 
         // TODO
         // delete PcoThread::thisThread();
@@ -104,40 +103,37 @@ private:
         while (true) {
             monitorIn();
 
-            std::atomic<bool> *timeout = new std::atomic<bool>(true);
-            PcoThread *thisThread = PcoThread::thisThread();
+            auto timeout = std::make_shared<std::atomic<bool>>(true);
+            auto stopRequested = std::make_shared<std::atomic<bool>>(false);
 
-            new PcoThread(&ThreadPool::handleTimeout, this, thisThread, timeout);
-
-            if (waiting.empty() && !PcoThread::thisThread()->stopRequested()) wait(condition);
-            if (PcoThread::thisThread()->stopRequested()) {
-                auto iterator = std::find(threads.begin(), threads.end(), PcoThread::thisThread());
-                threads.erase(iterator, next(iterator));
+            if (!PcoThread::thisThread()->stopRequested()) {
+                new PcoThread(&ThreadPool::handleTimeout, this, stopRequested, timeout);
+                if (waiting.empty()) wait(condition);
+            }
+            if (PcoThread::thisThread()->stopRequested() || *stopRequested) {
+                --nbThread;
 
                 monitorOut();
 
-                // TODO
-                // delete PcoThread::thisThread();
                 return;
             }
             *timeout = false;
 
-            ++nbWorking;
-
             std::unique_ptr<Runnable> task = std::move(waiting.front());
             waiting.pop();
+            if (waiting.empty()) signal(stopCondition);
 
-            // unlock monitor before running the task
+            mutexNbWorking.lock();
+            ++nbWorking;
+            mutexNbWorking.unlock();
+
             monitorOut();
           
             task->run();
 
-            monitorIn();
-            
+            mutexNbWorking.lock();
             --nbWorking;
-            if (waiting.empty()) signal(stopCondition);
-
-            monitorOut();
+            mutexNbWorking.unlock();
         }
     }
 
@@ -146,9 +142,11 @@ private:
     std::chrono::milliseconds idleTimeout;
     std::vector<PcoThread *>threads{};
     size_t nbWorking = 0;
+    size_t nbThread = 0;
     std::queue<std::unique_ptr<Runnable>> waiting{};
     Condition condition;
     Condition stopCondition;
+    PcoMutex mutexNbWorking{};
 };
 
 #endif // THREADPOOL_H
