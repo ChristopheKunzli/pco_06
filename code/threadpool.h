@@ -107,6 +107,7 @@ private:
             auto stopRequested = std::make_shared<std::atomic<bool>>(false);
 
             if (!PcoThread::thisThread()->stopRequested()) {
+                // TODO either delete dynamically allocated thread or do it another way
                 new PcoThread(&ThreadPool::handleTimeout, this, stopRequested, timeout);
                 if (waiting.empty()) wait(condition);
             }
@@ -129,6 +130,7 @@ private:
 
             monitorOut();
           
+            // TODO Core dump append here as task == nullptr
             task->run();
 
             mutexNbWorking.lock();
