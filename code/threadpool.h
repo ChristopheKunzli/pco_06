@@ -43,6 +43,11 @@ public:
             t->join();
             delete t;
         }
+
+        for (PcoThread *t : timeoutThreads) {
+            t->join();
+            delete t;
+        }
     }
 
     /*
@@ -97,9 +102,6 @@ private:
             signal(condition);
             monitorOut();
         }
-
-        // TODO
-        // delete PcoThread::thisThread();
     }
 
     void execute() {
@@ -110,8 +112,8 @@ private:
             auto stopRequested = std::make_shared<std::atomic<bool>>(false);
 
             if (!PcoThread::thisThread()->stopRequested()) {
-                // TODO either delete dynamically allocated thread or do it another way
-                new PcoThread(&ThreadPool::handleTimeout, this, stopRequested, timeout);
+                timeoutThreads.push_back(new PcoThread(&ThreadPool::handleTimeout, this, stopRequested, timeout));
+
                 if (waiting.empty()) wait(condition);
             }
             if (PcoThread::thisThread()->stopRequested() || *stopRequested) {
@@ -133,7 +135,6 @@ private:
 
             monitorOut();
           
-            // TODO Core dump append here as task == nullptr
             task->run();
 
             mutexNbWorking.lock();
@@ -146,6 +147,7 @@ private:
     size_t maxNbWaiting;
     std::chrono::milliseconds idleTimeout;
     std::vector<PcoThread *>threads{};
+    std::vector<PcoThread *> timeoutThreads{};
     size_t nbWorking = 0;
     size_t nbThread = 0;
     std::queue<std::unique_ptr<Runnable>> waiting{};
