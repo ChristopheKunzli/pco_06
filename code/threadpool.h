@@ -34,6 +34,9 @@ public:
 
         for (PcoThread *t : threads) {
             t->requestStop();
+        }
+
+        for (PcoThread *t : threads) {
             monitorIn();
             signal(condition);
             monitorOut();
