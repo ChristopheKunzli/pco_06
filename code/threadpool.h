@@ -4,7 +4,6 @@
 #include <iostream>
 #include <stack>
 #include <vector>
-#include <future>
 #include <atomic>
 #include <algorithm>
 #include <chrono>
@@ -21,6 +20,7 @@ public:
     virtual std::string id() = 0;
 };
 
+// Utilisé pour transmettre un unique_ptr en argument de la méthode d'un thread car std::move() ne semble pas fonctionner
 class RunnableWrapper {
     private:
     std::unique_ptr<Runnable> runnable;
@@ -39,24 +39,32 @@ public:
 
     ~ThreadPool() {
         monitorIn();
+        // Wait for all tasks to be processed
         if (!waiting.empty()) wait(stopCondition);
         monitorOut();
 
         for (auto t : threads) {
             monitorIn();
+            // request stop
             t.thread->requestStop();
+            // signal on the condition if the thread is blocked on it
             signal(*t.condition);
             monitorOut();
 
+            // wait for the thread to end
             t.thread->join();
             
+            // delete allocated ressources
             delete t.thread;
             delete t.condition;
             delete t.isWaiting;
         }
 
         for (PcoThread *t : timeoutThreads) {
+            // wait for the timeout thread to end
             t->join();
+            
+            // delete the timeout thread
             delete t;
         }
     }
@@ -72,6 +80,7 @@ public:
     bool start(std::unique_ptr<Runnable> runnable) {
         monitorIn();
 
+        // Check if the task can be processed
         if (waiting.size() == maxNbWaiting) {
             runnable->cancelRun();
             monitorOut();
@@ -79,6 +88,7 @@ public:
         }
 
         if (nbWaiting() <= waiting.size() && currentNbThreads() < maxThreadCount) {
+            // Create a new thread if required
             ++nbThread;
             Condition *threadCondition = new Condition();
             std::atomic<bool> *isWaiting = new std::atomic<bool>(false);
@@ -91,12 +101,14 @@ public:
             std::shared_ptr<Condition> runnableCondition = std::make_shared<Condition>();
             std::shared_ptr<std::atomic<bool>> runnableIsProcessed = std::make_shared<std::atomic<bool>>(false);
 
+            // Otherwise push a task to the queue
             waiting.push({
                 std::move(runnable),
                 runnableIsProcessed,
                 runnableCondition,
             });
 
+            // Find and signal a waiting thread a task has arrived
             for (auto t : threads) {
                 if (*t.isWaiting) {
                     *t.isWaiting = false;
@@ -105,6 +117,7 @@ public:
                 }
             }
     
+            // Wait for the task to be processed
             if (!*runnableIsProcessed) wait(*runnableCondition);
         }
 
@@ -131,11 +144,17 @@ private:
     }
 
     void handleTimeout(std::shared_ptr<std::atomic<bool>> canTimeout, std::shared_ptr<std::atomic<bool>> stopRequested, Condition *condition, std::atomic<bool> *isWaiting) {
+        // Sleep for the timeout
         PcoThread::thisThread()->usleep(1000 * idleTimeout.count());
+        
+        // Check if the parent thread found a task to run
         if (*canTimeout) {
             monitorIn();
+            // Ask for stop
             *stopRequested = true;
             *isWaiting = false;
+
+            // Unlock parent thread blocked in wait
             signal(*condition);
             monitorOut();
 
@@ -144,9 +163,11 @@ private:
     }
 
     void execute(Condition *condition, std::atomic<bool> *isWaiting, std::shared_ptr<RunnableWrapper> task) {
+        // Execute the task given as parameter
         std::unique_ptr<Runnable> runnable = std::move(task->release());
         runnable->run();
         
+        // Find new tasks to run
         while (true) {
             monitorIn();
 
@@ -154,12 +175,14 @@ private:
             auto stopRequested = std::make_shared<std::atomic<bool>>(false);
 
             if (waiting.empty() && !PcoThread::thisThread()->stopRequested()) {
+                // If the task queue is empty wait for a new task to arrive
                 *isWaiting = true;
                 timeoutThreads.push_back(new PcoThread(&ThreadPool::handleTimeout, this, canTimeout, stopRequested, condition, isWaiting));
                 wait(*condition);
                 *canTimeout = false;
             }
 
+            // If a stop is required either by destructor or timeout, end thread
             if (PcoThread::thisThread()->stopRequested() || *stopRequested) {
                 --nbThread;
 
@@ -168,15 +191,21 @@ private:
                 return;
             }
 
+            // Take a task on the queue
             runnable = std::move(waiting.front().runnable);
+            
+            // Signal start method the task is processed
             *waiting.front().isProcessed = true;
             signal(*waiting.front().condition);
+            
             waiting.pop();
 
+            // Signal destructor if required no task is left
             if (waiting.empty()) signal(stopCondition);
 
             monitorOut();
           
+            // Execute task
             runnable->run();
         }
     }
