@@ -12,7 +12,6 @@
 #include <pcosynchro/pcologger.h>
 #include <pcosynchro/pcothread.h>
 #include <pcosynchro/pcohoaremonitor.h>
-#include <pcosynchro/pcomutex.h>
 
 class Runnable {
 public:
@@ -32,16 +31,17 @@ public:
         if (!waiting.empty()) wait(stopCondition);
         monitorOut();
 
-        for (PcoThread *t : threads) {
-            t->requestStop();
-        }
-
-        for (PcoThread *t : threads) {
+        for (auto t : threads) {
             monitorIn();
-            signal(condition);
+            t.thread->requestStop();
+            signal(*t.condition);
             monitorOut();
-            t->join();
-            delete t;
+
+            t.thread->join();
+            
+            delete t.thread;
+            delete t.condition;
+            delete t.isWaiting;
         }
 
         for (PcoThread *t : timeoutThreads) {
@@ -61,19 +61,44 @@ public:
     bool start(std::unique_ptr<Runnable> runnable) {
         monitorIn();
 
-        // TODO if (currentNbThreads == maxThreadCount)
-
-        waiting.push(std::move(runnable));
-        bool createNewThread = nbWaiting() < waiting.size() && currentNbThreads() < maxThreadCount;
-        bool isStarted = createNewThread || nbWaiting() >= waiting.size();
-        if (createNewThread) {
-            ++nbThread;
-            threads.push_back(new PcoThread(&ThreadPool::execute, this));
+        if (waiting.size() == maxNbWaiting) {
+            runnable->cancelRun();
+            monitorOut();
+            return false;
         }
+
+        std::shared_ptr<Condition> runnableCondition = std::make_shared<Condition>();
+        std::shared_ptr<std::atomic<bool>> runnableIsProcessed = std::make_shared<std::atomic<bool>>(false);
+        waiting.push({
+            std::move(runnable),
+            runnableIsProcessed,
+            runnableCondition,
+        });
+
+        if (nbWaiting() < waiting.size() && currentNbThreads() < maxThreadCount) {
+            ++nbThread;
+            Condition *threadCondition = new Condition();
+            std::atomic<bool> *isWaiting = new std::atomic<bool>(false);
+            threads.push_back({
+                new PcoThread(&ThreadPool::execute, this, threadCondition, isWaiting),
+                threadCondition,
+                isWaiting,
+            });
+        } else {
+            for (auto t : threads) {
+                if (*t.isWaiting) {
+                    *t.isWaiting = false;
+                    signal(*t.condition);
+                    break;
+                }
+            }
+        }
+
+        if (!*runnableIsProcessed) wait(*runnableCondition);
 
         monitorOut();
 
-        return isStarted;
+        return true;
     }
 
     /* Returns the number of currently running threads. They do not need to be executing a task,
@@ -86,36 +111,40 @@ public:
 private:
 
     size_t nbWaiting() {
-        mutexNbWorking.lock();
-        size_t amount = nbThread - nbWorking;
-        mutexNbWorking.unlock();
+        int amount = 0;
+        for (struct Thread t : threads)
+            if (t.isWaiting) ++amount;
 
         return amount;
     }
 
-    void handleTimeout(std::shared_ptr<std::atomic<bool>> requestedStop, std::shared_ptr<std::atomic<bool>> timeout) {
+    void handleTimeout(std::shared_ptr<std::atomic<bool>> canTimeout, std::shared_ptr<std::atomic<bool>> stopRequested, Condition *condition, std::atomic<bool> *isWaiting) {
         PcoThread::thisThread()->usleep(1000 * idleTimeout.count());
-        if (*timeout) {
-            std::cout << "timeout" << std::endl << std::flush;
-            *requestedStop = true;
+        if (*canTimeout) {
             monitorIn();
-            signal(condition);
+            *stopRequested = true;
+            *isWaiting = false;
+            signal(*condition);
             monitorOut();
+
+            return;
         }
     }
 
-    void execute() {
+    void execute(Condition *condition, std::atomic<bool> *isWaiting) {
         while (true) {
             monitorIn();
 
-            auto timeout = std::make_shared<std::atomic<bool>>(true);
+            auto canTimeout = std::make_shared<std::atomic<bool>>(true);
             auto stopRequested = std::make_shared<std::atomic<bool>>(false);
 
-            if (!PcoThread::thisThread()->stopRequested()) {
-                timeoutThreads.push_back(new PcoThread(&ThreadPool::handleTimeout, this, stopRequested, timeout));
-
-                if (waiting.empty()) wait(condition);
+            if (waiting.empty() && !PcoThread::thisThread()->stopRequested()) {
+                *isWaiting = true;
+                timeoutThreads.push_back(new PcoThread(&ThreadPool::handleTimeout, this, canTimeout, stopRequested, condition, isWaiting));
+                wait(*condition);
+                *canTimeout = false;
             }
+
             if (PcoThread::thisThread()->stopRequested() || *stopRequested) {
                 --nbThread;
 
@@ -123,37 +152,38 @@ private:
 
                 return;
             }
-            *timeout = false;
 
-            std::unique_ptr<Runnable> task = std::move(waiting.front());
+            std::unique_ptr<Runnable> task = std::move(waiting.front().runnable);
+            *waiting.front().isProcessed = true;
+            signal(*waiting.front().condition);
             waiting.pop();
-            if (waiting.empty()) signal(stopCondition);
 
-            mutexNbWorking.lock();
-            ++nbWorking;
-            mutexNbWorking.unlock();
+            if (waiting.empty()) signal(stopCondition);
 
             monitorOut();
           
             task->run();
-
-            mutexNbWorking.lock();
-            --nbWorking;
-            mutexNbWorking.unlock();
         }
     }
 
     size_t maxThreadCount;
     size_t maxNbWaiting;
     std::chrono::milliseconds idleTimeout;
-    std::vector<PcoThread *>threads{};
-    std::vector<PcoThread *> timeoutThreads{};
-    size_t nbWorking = 0;
     size_t nbThread = 0;
-    std::queue<std::unique_ptr<Runnable>> waiting{};
-    Condition condition;
-    Condition stopCondition;
-    PcoMutex mutexNbWorking{};
+    struct Thread {
+        PcoThread *thread;
+        Condition *condition;
+        std::atomic<bool> *isWaiting;
+    };
+    std::vector<struct Thread>threads{};
+    std::vector<PcoThread *> timeoutThreads{};
+    struct Task {
+        std::unique_ptr<Runnable> runnable;
+        std::shared_ptr<std::atomic<bool>> isProcessed;
+        std::shared_ptr<Condition> condition;
+    };
+    std::queue<struct Task> waiting{};
+    Condition stopCondition{};
 };
 
 #endif // THREADPOOL_H
