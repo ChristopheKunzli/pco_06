@@ -21,6 +21,17 @@ public:
     virtual std::string id() = 0;
 };
 
+class RunnableWrapper {
+    private:
+    std::unique_ptr<Runnable> runnable;
+    public:
+    RunnableWrapper(std::unique_ptr<Runnable> runnable) : runnable(std::move(runnable)) {}
+    RunnableWrapper(RunnableWrapper& other) : runnable(std::move(other.runnable)) {}
+    std::unique_ptr<Runnable> release() {
+        return std::move(runnable);
+    }
+};
+
 class ThreadPool : PcoHoareMonitor {
 public:
     ThreadPool(int maxThreadCount, int maxNbWaiting, std::chrono::milliseconds idleTimeout)
@@ -67,24 +78,25 @@ public:
             return false;
         }
 
-        std::shared_ptr<Condition> runnableCondition = std::make_shared<Condition>();
-        std::shared_ptr<std::atomic<bool>> runnableIsProcessed = std::make_shared<std::atomic<bool>>(false);
-        waiting.push({
-            std::move(runnable),
-            runnableIsProcessed,
-            runnableCondition,
-        });
-
-        if (nbWaiting() < waiting.size() && currentNbThreads() < maxThreadCount) {
+        if (nbWaiting() <= waiting.size() && currentNbThreads() < maxThreadCount) {
             ++nbThread;
             Condition *threadCondition = new Condition();
             std::atomic<bool> *isWaiting = new std::atomic<bool>(false);
             threads.push_back({
-                new PcoThread(&ThreadPool::execute, this, threadCondition, isWaiting),
+                new PcoThread(&ThreadPool::execute, this, threadCondition, isWaiting, std::make_shared<RunnableWrapper>(std::move(runnable))),
                 threadCondition,
                 isWaiting,
             });
         } else {
+            std::shared_ptr<Condition> runnableCondition = std::make_shared<Condition>();
+            std::shared_ptr<std::atomic<bool>> runnableIsProcessed = std::make_shared<std::atomic<bool>>(false);
+
+            waiting.push({
+                std::move(runnable),
+                runnableIsProcessed,
+                runnableCondition,
+            });
+
             for (auto t : threads) {
                 if (*t.isWaiting) {
                     *t.isWaiting = false;
@@ -92,9 +104,9 @@ public:
                     break;
                 }
             }
+    
+            if (!*runnableIsProcessed) wait(*runnableCondition);
         }
-
-        if (!*runnableIsProcessed) wait(*runnableCondition);
 
         monitorOut();
 
@@ -113,7 +125,7 @@ private:
     size_t nbWaiting() {
         int amount = 0;
         for (struct Thread t : threads)
-            if (t.isWaiting) ++amount;
+            if (*t.isWaiting) ++amount;
 
         return amount;
     }
@@ -131,7 +143,10 @@ private:
         }
     }
 
-    void execute(Condition *condition, std::atomic<bool> *isWaiting) {
+    void execute(Condition *condition, std::atomic<bool> *isWaiting, std::shared_ptr<RunnableWrapper> task) {
+        std::unique_ptr<Runnable> runnable = std::move(task->release());
+        runnable->run();
+        
         while (true) {
             monitorIn();
 
@@ -153,7 +168,7 @@ private:
                 return;
             }
 
-            std::unique_ptr<Runnable> task = std::move(waiting.front().runnable);
+            runnable = std::move(waiting.front().runnable);
             *waiting.front().isProcessed = true;
             signal(*waiting.front().condition);
             waiting.pop();
@@ -162,7 +177,7 @@ private:
 
             monitorOut();
           
-            task->run();
+            runnable->run();
         }
     }
 

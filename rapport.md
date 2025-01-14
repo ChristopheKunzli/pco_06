@@ -27,9 +27,10 @@ Méthodes implémentées :
     - Retourne true si la tâche est acceptée, false si trop de tâches sont en attentes.
     - Un bloquage de l'appelant peut avoir lieu si la tâche est acceptée, mais pas traitée immédiatement.
     - Les accès concurrents sont gérés par le moniteur.
-- `void execute(Condition *condition, std::atomic<bool> *isWaiting)`
+- `void execute(Condition *condition, std::atomic<bool> *isWaiting, std::shared_ptr<RunnableWrapper> runnableWrapper)`
     - Routine des threads internes.
-    - Prend une tâche de la file d'attente si disponible
+    - Exécute d'abord la tâche qui lui a été attribuée.
+    - Prend ensuite une tâche de la file d'attente si disponible
     - Informe les clients en attente dans `start` que la tâche va être executée
     - Execute la tâche
     - Sinon le thread se met en attente.
@@ -55,6 +56,9 @@ Attributs de la class:
   - `std::unique_ptr<Runnable> runnable`: un pointeur sur le runnable à traiter
   - `std::shared_ptr<std::atomic<bool>> isProcessed`: un boolean mis à true lorsque la runnable a été traitée.
   - `std::shared_ptr<Condition> condition`: une variable de condition utilisée par la méthode start pour être informé lorsque la tâche est traitée.
+
+Class
+- `RunnableWrapper`: permet de transmettre un unique_ptr en argument de la méthode d'un thread car std::move() ne semble pas fonctionner
 
 ## Tests
 
